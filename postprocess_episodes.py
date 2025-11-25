@@ -70,20 +70,11 @@ def main(args):
         if base_action is not None:
             base_action = base_action * MIRROR_BASE_MULTIPLY
 
-        # mirror image obs
-        if 'left_wrist' in image_dict.keys():
-            image_dict['left_wrist'], image_dict['right_wrist'] = image_dict['right_wrist'][:, :, ::-1], image_dict['left_wrist'][:, :, ::-1]
-        elif 'cam_left_wrist' in image_dict.keys():
-            image_dict['cam_left_wrist'], image_dict['cam_right_wrist'] = image_dict['cam_right_wrist'][:, :, ::-1], image_dict['cam_left_wrist'][:, :, ::-1]
-        else:
-            raise Exception('No left_wrist or cam_left_wrist in image_dict')
-
-        if 'top' in image_dict.keys():
-            image_dict['top'] = image_dict['top'][:, :, ::-1]
-        elif 'cam_high' in image_dict.keys():
-            image_dict['cam_high'] = image_dict['cam_high'][:, :, ::-1]
-        else:
-            raise Exception('No top or cam_high in image_dict')
+        # mirror image obs - flip horizontally for external cameras
+        if 'arm_camera' in image_dict.keys():
+            image_dict['arm_camera'] = image_dict['arm_camera'][:, :, ::-1]
+        if 'zed_camera' in image_dict.keys():
+            image_dict['zed_camera'] = image_dict['zed_camera'][:, :, ::-1]
 
         # saving
         data_dict = {
