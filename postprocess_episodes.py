@@ -148,9 +148,9 @@ def main(args):
                 else:
                     _ = image.create_dataset(cam_name, (max_timesteps, 480, 640, 3), dtype='uint8',
                                             chunks=(1, 480, 640, 3), )
-            qpos = obs.create_dataset('qpos', (max_timesteps, 14))
-            qvel = obs.create_dataset('qvel', (max_timesteps, 14))
-            action = root.create_dataset('action', (max_timesteps, 14))
+            qpos = obs.create_dataset('qpos', (max_timesteps, 11))
+            qvel = obs.create_dataset('qvel', (max_timesteps, 11))
+            action = root.create_dataset('action', (max_timesteps, 11))
             if base_action is not None:
                 base_action = root.create_dataset('base_action', (max_timesteps, 2))
 

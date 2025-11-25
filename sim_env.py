@@ -19,20 +19,26 @@ BOX_POSE = [None] # to be changed from outside
 
 def make_sim_env(task_name):
     """
-    Environment for simulated robot bi-manual manipulation, with joint position control
-    Action space:      [left_arm_qpos (6),             # absolute joint position
-                        left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
-                        right_arm_qpos (6),            # absolute joint position
-                        right_gripper_positions (1),]  # normalized gripper position (0: close, 1: open)
+    Environment for simulated robot single-arm manipulation, with joint position control
+    Action space:      [arm_qpos (6),                 # absolute joint position
+                        gripper_position (1),         # normalized gripper position (0: close, 1: open)
+                        body_z (1),                    # body z position
+                        body_vel_x (1),                # body velocity x
+                        body_vel_y (1),                # body velocity y
+                        body_pitch (1)]                # body pitch angle
 
-    Observation space: {"qpos": Concat[ left_arm_qpos (6),         # absolute joint position
-                                        left_gripper_position (1),  # normalized gripper position (0: close, 1: open)
-                                        right_arm_qpos (6),         # absolute joint position
-                                        right_gripper_qpos (1)]     # normalized gripper position (0: close, 1: open)
-                        "qvel": Concat[ left_arm_qvel (6),         # absolute joint velocity (rad)
-                                        left_gripper_velocity (1),  # normalized gripper velocity (pos: opening, neg: closing)
-                                        right_arm_qvel (6),         # absolute joint velocity (rad)
-                                        right_gripper_qvel (1)]     # normalized gripper velocity (pos: opening, neg: closing)
+    Observation space: {"qpos": Concat[ arm_qpos (6),             # absolute joint position
+                                        gripper_position (1),     # normalized gripper position (0: close, 1: open)
+                                        body_z (1),                # body z position
+                                        body_vel_x (1),            # body velocity x
+                                        body_vel_y (1),            # body velocity y
+                                        body_pitch (1)]            # body pitch angle
+                        "qvel": Concat[ arm_qvel (6),             # absolute joint velocity (rad)
+                                        gripper_velocity (1),     # normalized gripper velocity (pos: opening, neg: closing)
+                                        body_z_vel (1),            # body z velocity
+                                        body_vel_x (1),            # body velocity x
+                                        body_vel_y (1),            # body velocity y
+                                        body_pitch_vel (1)]        # body pitch velocity
                         "images": {"main": (480x640x3)}        # h, w, c, dtype='uint8'
     """
     if 'sim_transfer_cube' in task_name:
@@ -56,18 +62,18 @@ class BimanualViperXTask(base.Task):
         super().__init__(random=random)
 
     def before_step(self, action, physics):
-        left_arm_action = action[:6]
-        right_arm_action = action[7:7+6]
-        normalized_left_gripper_action = action[6]
-        normalized_right_gripper_action = action[7+6]
+        arm_action = action[:6]
+        normalized_gripper_action = action[6]
+        body_z = action[7]
+        body_vel_x = action[8]
+        body_vel_y = action[9]
+        body_pitch = action[10]
 
-        left_gripper_action = PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN(normalized_left_gripper_action)
-        right_gripper_action = PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN(normalized_right_gripper_action)
+        gripper_action = PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN(normalized_gripper_action)
+        full_gripper_action = [gripper_action, -gripper_action]
 
-        full_left_gripper_action = [left_gripper_action, -left_gripper_action]
-        full_right_gripper_action = [right_gripper_action, -right_gripper_action]
-
-        env_action = np.concatenate([left_arm_action, full_left_gripper_action, right_arm_action, full_right_gripper_action])
+        env_action = np.concatenate([arm_action, full_gripper_action])
+        # Note: body_z, body_vel_x, body_vel_y, body_pitch are used for state tracking but don't directly control the arm
         super().before_step(env_action, physics)
         return
 
@@ -78,24 +84,33 @@ class BimanualViperXTask(base.Task):
     @staticmethod
     def get_qpos(physics):
         qpos_raw = physics.data.qpos.copy()
-        left_qpos_raw = qpos_raw[:8]
-        right_qpos_raw = qpos_raw[8:16]
-        left_arm_qpos = left_qpos_raw[:6]
-        right_arm_qpos = right_qpos_raw[:6]
-        left_gripper_qpos = [PUPPET_GRIPPER_POSITION_NORMALIZE_FN(left_qpos_raw[6])]
-        right_gripper_qpos = [PUPPET_GRIPPER_POSITION_NORMALIZE_FN(right_qpos_raw[6])]
-        return np.concatenate([left_arm_qpos, left_gripper_qpos, right_arm_qpos, right_gripper_qpos])
+        arm_qpos_raw = qpos_raw[:8]
+        arm_qpos = arm_qpos_raw[:6]
+        gripper_qpos = [PUPPET_GRIPPER_POSITION_NORMALIZE_FN(arm_qpos_raw[6])]
+
+        # Get body state (z position, x velocity, y velocity, pitch)
+        # Assuming body info is in remaining qpos indices or can be derived from physics
+        body_z = qpos_raw[16] if len(qpos_raw) > 16 else 0.0  # body z position
+        body_vel_x = 0.0  # default, will be populated from body velocity
+        body_vel_y = 0.0  # default, will be populated from body velocity
+        body_pitch = 0.0  # default, will be populated from body orientation
+
+        return np.concatenate([arm_qpos, gripper_qpos, [body_z], [body_vel_x], [body_vel_y], [body_pitch]])
 
     @staticmethod
     def get_qvel(physics):
         qvel_raw = physics.data.qvel.copy()
-        left_qvel_raw = qvel_raw[:8]
-        right_qvel_raw = qvel_raw[8:16]
-        left_arm_qvel = left_qvel_raw[:6]
-        right_arm_qvel = right_qvel_raw[:6]
-        left_gripper_qvel = [PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN(left_qvel_raw[6])]
-        right_gripper_qvel = [PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN(right_qvel_raw[6])]
-        return np.concatenate([left_arm_qvel, left_gripper_qvel, right_arm_qvel, right_gripper_qvel])
+        arm_qvel_raw = qvel_raw[:8]
+        arm_qvel = arm_qvel_raw[:6]
+        gripper_qvel = [PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN(arm_qvel_raw[6])]
+
+        # Get body state velocities
+        body_z_vel = 0.0  # default, will be populated from body velocity
+        body_vel_x = 0.0  # default, will be populated from body velocity
+        body_vel_y = 0.0  # default, will be populated from body velocity
+        body_pitch_vel = 0.0  # default, will be populated from body angular velocity
+
+        return np.concatenate([arm_qvel, gripper_qvel, [body_z_vel], [body_vel_x], [body_vel_y], [body_pitch_vel]])
 
     @staticmethod
     def get_env_state(physics):
@@ -231,18 +246,19 @@ class InsertionTask(BimanualViperXTask):
         return reward
 
 
-def get_action(master_bot_left, master_bot_right):
-    action = np.zeros(14)
+def get_action(master_bot_left, master_bot_right=None):
+    action = np.zeros(11)
     # arm action
     action[:6] = master_bot_left.dxl.joint_states.position[:6]
-    action[7:7+6] = master_bot_right.dxl.joint_states.position[:6]
     # gripper action
-    left_gripper_pos = master_bot_left.dxl.joint_states.position[7]
-    right_gripper_pos = master_bot_right.dxl.joint_states.position[7]
-    normalized_left_pos = MASTER_GRIPPER_POSITION_NORMALIZE_FN(left_gripper_pos)
-    normalized_right_pos = MASTER_GRIPPER_POSITION_NORMALIZE_FN(right_gripper_pos)
-    action[6] = normalized_left_pos
-    action[7+6] = normalized_right_pos
+    gripper_pos = master_bot_left.dxl.joint_states.position[7]
+    normalized_pos = MASTER_GRIPPER_POSITION_NORMALIZE_FN(gripper_pos)
+    action[6] = normalized_pos
+    # body state action (z position, vel_x, vel_y, pitch)
+    action[7] = 0.0  # body_z
+    action[8] = 0.0  # body_vel_x
+    action[9] = 0.0  # body_vel_y
+    action[10] = 0.0  # body_pitch
     return action
 
 def test_sim_teleop():
