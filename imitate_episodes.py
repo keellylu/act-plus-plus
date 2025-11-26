@@ -308,9 +308,9 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
     if temporal_agg:
         query_frequency = 1
         num_queries = policy_config['num_queries']
-    if real_robot:
-        BASE_DELAY = 13
-        query_frequency -= BASE_DELAY
+    # if real_robot:
+    #     BASE_DELAY = 13
+    #     query_frequency -= BASE_DELAY
 
     max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
 
@@ -397,8 +397,8 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                             all_actions = policy(qpos, curr_image)
                         # if use_actuator_net:
                         #     collect_base_action(all_actions, norm_episode_all_base_actions)
-                        if real_robot:
-                            all_actions = torch.cat([all_actions[:, :-BASE_DELAY, :-2], all_actions[:, BASE_DELAY:, -2:]], dim=2)
+                        # if real_robot:
+                        #     all_actions = torch.cat([all_actions[:, :-BASE_DELAY, :-2], all_actions[:, BASE_DELAY:, -2:]], dim=2)
                     if temporal_agg:
                         all_time_actions[[t], t:t+num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]
@@ -419,8 +419,8 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                         all_actions = policy(qpos, curr_image)
                         # if use_actuator_net:
                         #     collect_base_action(all_actions, norm_episode_all_base_actions)
-                        if real_robot:
-                            all_actions = torch.cat([all_actions[:, :-BASE_DELAY, :-2], all_actions[:, BASE_DELAY:, -2:]], dim=2)
+                        # if real_robot:
+                        #     all_actions = torch.cat([all_actions[:, :-BASE_DELAY, :-2], all_actions[:, BASE_DELAY:, -2:]], dim=2)
                     raw_action = all_actions[:, t % query_frequency]
                 elif config['policy_class'] == "CNNMLP":
                     raw_action = policy(qpos, curr_image)
@@ -435,7 +435,7 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                 time4 = time.time()
                 raw_action = raw_action.squeeze(0).cpu().numpy()
                 action = post_process(raw_action)
-                target_qpos = action[:-2]
+                target_qpos = action
 
                 # if use_actuator_net:
                 #     assert(not temporal_agg)
@@ -447,7 +447,7 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                 #         base_action_chunk = actuator_unnorm(pred.detach().cpu().numpy()[0])
                 #     base_action = base_action_chunk[t % prediction_len]
                 # else:
-                base_action = action[-2:]
+                # base_action = action[-2:]
                 # base_action = calibrate_linear_vel(base_action, c=0.19)
                 # base_action = postprocess_base_action(base_action)
                 # print('post process: ', time.time() - time4)
@@ -455,7 +455,7 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                 ### step the environment
                 time5 = time.time()
                 if real_robot:
-                    ts = env.step(target_qpos, base_action)
+                    ts = env.step(target_qpos)
                 else:
                     ts = env.step(target_qpos)
                 # print('step env: ', time.time() - time5)
@@ -478,7 +478,10 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
             print(f'Avg fps {max_timesteps / (time.time() - time0)}')
             plt.close()
         if real_robot:
-            move_grippers([env.puppet_bot_left, env.puppet_bot_right], [PUPPET_GRIPPER_JOINT_OPEN] * 2, move_time=0.5)  # open
+            # TODO: here they open the grippers for safety at end of every rollout, 
+            # maybe we want to do smth similar with spot
+            
+            # move_grippers([env.puppet_bot_left, env.puppet_bot_right], [PUPPET_GRIPPER_JOINT_OPEN] * 2, move_time=0.5)  # open
             # save qpos_history_raw
             log_id = get_auto_index(ckpt_dir)
             np.save(os.path.join(ckpt_dir, f'qpos_{log_id}.npy'), qpos_history_raw)
