@@ -52,7 +52,7 @@ def main(args):
 
     # get task parameters
     is_sim = task_name[:4] == 'sim_'
-    if is_sim or task_name == 'all':
+    if is_sim or task_name == 'all' or task_name == 'real_spot_open_drawer':
         from constants import SIM_TASK_CONFIGS
         task_config = SIM_TASK_CONFIGS[task_name]
     else:

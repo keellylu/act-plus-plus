@@ -2,7 +2,7 @@ import pathlib
 import os
 
 ### Task parameters
-DATA_DIR = '/home/zfu/interbotix_ws/src/act/data' if os.getlogin() == 'zfu' else '/scr/tonyzhao/datasets'
+DATA_DIR = "/home/kelly_lucy/act-plus-plus/demos"
 SIM_TASK_CONFIGS = {
     'sim_transfer_cube_scripted':{
         'dataset_dir': DATA_DIR + '/sim_transfer_cube_scripted',
@@ -49,6 +49,13 @@ SIM_TASK_CONFIGS = {
     'sim_insertion_scripted_mirror': {
         'dataset_dir': DATA_DIR + '/sim_insertion_scripted_mirror',
         'num_episodes': None,
+        'episode_len': 400,
+        'camera_names': ['arm_camera', 'zed_camera']
+    },
+
+    'real_spot_open_drawer':{
+        'dataset_dir': DATA_DIR,
+        'num_episodes': 1,
         'episode_len': 400,
         'camera_names': ['arm_camera', 'zed_camera']
     },
