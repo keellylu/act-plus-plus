@@ -3,6 +3,7 @@ import os
 
 ### Task parameters
 DATA_DIR = "/home/kelly_lucy/act-plus-plus/demos"
+TELEOPERATION_DATA_DIR = "/home/kelly_lucy/Downloads/see-spot-plan/teleoperation_data"
 SIM_TASK_CONFIGS = {
     'sim_transfer_cube_scripted':{
         'dataset_dir': DATA_DIR + '/sim_transfer_cube_scripted',
@@ -54,9 +55,9 @@ SIM_TASK_CONFIGS = {
     },
 
     'real_spot_open_drawer':{
-        'dataset_dir': DATA_DIR,
-        'num_episodes': 1,
-        'episode_len': 400,
+        'dataset_dir': TELEOPERATION_DATA_DIR,
+        'num_episodes': 15,
+        'episode_len': 626,
         'camera_names': ['arm_camera', 'zed_camera']
     },
 

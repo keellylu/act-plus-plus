@@ -23,7 +23,6 @@ from visualize_episodes import save_videos
 from detr.models.latent_model import Latent_Model_Transformer
 
 from sim_env import BOX_POSE
-from spot_real_env import SpotRealEnv
 
 import IPython
 e = IPython.embed
@@ -146,8 +145,9 @@ def main(args):
     config_path = os.path.join(ckpt_dir, 'config.pkl')
     expr_name = ckpt_dir.split('/')[-1]
     if not is_eval:
-        wandb.init(project="mobile-aloha2", reinit=True, entity="mobile-aloha2", name=expr_name)
-        wandb.config.update(config)
+        # wandb.init(project="mobile-aloha2", reinit=True, entity="mobile-aloha2", name=expr_name)
+        # wandb.config.update(config)
+        pass
     with open(config_path, 'wb') as f:
         pickle.dump(config, f)
     if is_eval:
@@ -177,7 +177,7 @@ def main(args):
     ckpt_path = os.path.join(ckpt_dir, f'policy_best.ckpt')
     torch.save(best_state_dict, ckpt_path)
     print(f'Best ckpt, val loss {min_val_loss:.6f} @ step{best_step}')
-    wandb.finish()
+    # wandb.finish()
 
 
 def make_policy(policy_class, policy_config):
@@ -299,7 +299,9 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
         # from aloha_scripts.robot_utils import move_grippers # requires aloha
         # from aloha_scripts.real_env import make_real_env # requires aloha
         # env = make_real_env(init_node=True, setup_robots=True, setup_base=True)
-        env = SpotRealEnv("192.168.80.3")
+        from spot_real_env_gpu import SpotRealEnvGPU
+        env = SpotRealEnvGPU(camera_names=['zed_camera', 'arm_camera'])
+        env.wait_for_mac_connection()
         env_max_reward = 0
     else:
         from sim_env import make_sim_env
@@ -319,8 +321,6 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
     episode_returns = []
     highest_rewards = []
     for rollout_id in range(num_rollouts):
-        if real_robot:
-            e()
         rollout_id += 0
         ### set task
         if 'sim_transfer_cube' in task_name:
@@ -328,10 +328,16 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
         elif 'sim_insertion' in task_name:
             BOX_POSE[0] = np.concatenate(sample_insertion_pose()) # used in sim reset
 
-        ts = env.reset()
+        if real_robot:
+            # For distributed inference, wait for reset signal from Mac
+            print(f"Waiting for reset signal from Mac (episode {rollout_id + 1})...")
+            qpos_reset = env.receive_qpos()
+            ts = env.get_observation(qpos_reset)
+        else:
+            ts = env.reset()
 
         ### onscreen render
-        if onscreen_render:
+        if onscreen_render and not real_robot:
             ax = plt.subplot()
             plt_img = ax.imshow(env._physics.render(height=480, width=640, camera_id=onscreen_cam))
             plt.ion()
@@ -457,7 +463,12 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                 ### step the environment
                 time5 = time.time()
                 if real_robot:
-                    ts = env.step(target_qpos)
+                    # Send action to Mac via distributed inference
+                    env.send_action(target_qpos)
+                    # Receive updated qpos from Mac
+                    qpos_new = env.receive_qpos()
+                    # Build timestep from received qpos and images
+                    ts = env.get_observation(qpos_new)
                 else:
                     ts = env.step(target_qpos)
                 # print('step env: ', time.time() - time5)
@@ -585,7 +596,7 @@ def train_bc(train_dataloader, val_dataloader, config):
                     best_ckpt_info = (step, min_val_loss, deepcopy(policy.serialize()))
             for k in list(validation_summary.keys()):
                 validation_summary[f'val_{k}'] = validation_summary.pop(k)            
-            wandb.log(validation_summary, step=step)
+            # wandb.log(validation_summary, step=step)
             print(f'Val loss:   {epoch_val_loss:.5f}')
             summary_string = ''
             for k, v in validation_summary.items():
@@ -610,7 +621,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         loss = forward_dict['loss']
         loss.backward()
         optimizer.step()
-        wandb.log(forward_dict, step=step) # not great, make training 1-2% slower
+        # wandb.log(forward_dict, step=step) # not great, make training 1-2% slower
 
         if step % save_every == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_step_{step}_seed_{seed}.ckpt')
