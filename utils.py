@@ -60,10 +60,16 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     base_action = root['/base_action'][()]
                     base_action = preprocess_base_action(base_action)
                     action = np.concatenate([root['/action'][()], base_action], axis=-1)
-                else:  
+                else:
                     action = root['/action'][()]
-                    dummy_base_action = np.zeros([action.shape[0], 2])
-                    action = np.concatenate([action, dummy_base_action], axis=-1)
+                    # Only add dummy base actions for sim data
+                    try:
+                        is_sim_check = root.attrs.get('sim', False)
+                    except:
+                        is_sim_check = False
+                    if is_sim_check:
+                        dummy_base_action = np.zeros([action.shape[0], 2])
+                        action = np.concatenate([action, dummy_base_action], axis=-1)
                 original_action_shape = action.shape
                 episode_len = original_action_shape[0]
                 # get observation at start_ts only
@@ -110,10 +116,14 @@ class EpisodicDataset(torch.utils.data.Dataset):
             # channel last
             image_data = torch.einsum('k h w c -> k c h w', image_data)
 
+            # resize images to 480x640 for policy compatibility (before augmentation)
+            resize_transform = transforms.Resize((480, 640), antialias=True)
+            image_data = resize_transform(image_data)
+
             # augmentation
             if self.transformations is None:
                 print('Initializing transformations')
-                original_size = image_data.shape[2:]
+                original_size = image_data.shape[2:]  # now 512x512
                 ratio = 0.95
                 self.transformations = [
                     transforms.RandomCrop(size=[int(original_size[0] * ratio), int(original_size[1] * ratio)]),
@@ -162,8 +172,14 @@ def get_norm_stats(dataset_path_list):
                     action = np.concatenate([root['/action'][()], base_action], axis=-1)
                 else:
                     action = root['/action'][()]
-                    dummy_base_action = np.zeros([action.shape[0], 2])
-                    action = np.concatenate([action, dummy_base_action], axis=-1)
+                    # Only add dummy base actions for sim data
+                    try:
+                        is_sim_check = root.attrs.get('sim', False)
+                    except:
+                        is_sim_check = False
+                    if is_sim_check:
+                        dummy_base_action = np.zeros([action.shape[0], 2])
+                        action = np.concatenate([action, dummy_base_action], axis=-1)
         except Exception as e:
             print(f'Error loading {dataset_path} in get_norm_stats')
             print(e)
