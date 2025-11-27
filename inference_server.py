@@ -110,18 +110,17 @@ def run_inference(
     policy_checkpoint: str,
     policy_config: dict,
     stats_path: str,
-    num_episodes: int = 5,
-    max_steps: int = 500,
 ):
     """
     Main inference loop on GPU.
+    
+    Note: GPU server follows Mac client's control. Mac client determines
+    num_episodes and max_steps. GPU server loops until Mac disconnects.
 
     Args:
         policy_checkpoint: Path to policy weights
         policy_config: Policy configuration
         stats_path: Path to normalization stats
-        num_episodes: Number of episodes to run
-        max_steps: Max steps per episode
     """
     # Setup
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -165,19 +164,44 @@ def run_inference(
         return
 
     try:
-        for episode_idx in range(num_episodes):
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Episode {episode_idx + 1}/{num_episodes}")
-            logger.info(f"{'='*60}")
-
-            # Wait for reset signal from Mac
-            logger.info("Waiting for reset signal from Mac...")
-            qpos = env.receive_qpos()
-            logger.info(f"Reset signal received. Initial qpos: {qpos[:3]}...")
-
-            episode_start_time = time.time()
-
-            for step_idx in range(max_steps):
+        # GPU server follows Mac client - responds to qpos requests until Mac disconnects
+        # Mac client controls num_episodes and max_steps, GPU just responds
+        episode_idx = 0
+        step_idx = 0
+        episode_start_time = None
+        last_qpos = None
+        
+        logger.info("Ready. Waiting for Mac client to start inference...")
+        
+        while True:
+            try:
+                # Receive qpos from Mac (could be reset signal or next step)
+                qpos = env.receive_qpos()
+                
+                # Detect new episode: if qpos changed significantly or it's the first one
+                is_new_episode = False
+                if last_qpos is None:
+                    is_new_episode = True
+                    episode_idx += 1
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Episode {episode_idx} started")
+                    logger.info(f"{'='*60}")
+                    episode_start_time = time.time()
+                    step_idx = 0
+                elif np.linalg.norm(qpos - last_qpos) > 0.5:  # Significant change = likely reset
+                    is_new_episode = True
+                    if step_idx > 0:
+                        episode_duration = time.time() - episode_start_time
+                        logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration:.1f}s")
+                    episode_idx += 1
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Episode {episode_idx} started")
+                    logger.info(f"{'='*60}")
+                    episode_start_time = time.time()
+                    step_idx = 0
+                
+                last_qpos = qpos.copy()
+                
                 # Get observation
                 obs = env.get_observation(qpos)
                 qpos_obs = obs.observation['qpos']
@@ -207,18 +231,21 @@ def run_inference(
 
                 # Send action to Mac
                 env.send_action(action)
-
-                # Receive next qpos from Mac
-                qpos = env.receive_qpos()
-
+                
+                step_idx += 1
                 if step_idx % 50 == 0:
-                    elapsed = time.time() - episode_start_time
-                    logger.info(f"Step {step_idx:3d}/{max_steps} | "
+                    elapsed = time.time() - episode_start_time if episode_start_time else 0
+                    logger.info(f"Step {step_idx:3d} | "
                               f"Elapsed: {elapsed:.1f}s | "
                               f"Action: [{action[0]:.3f}, {action[1]:.3f}, {action[2]:.3f}, ...]")
 
-            episode_duration = time.time() - episode_start_time
-            logger.info(f"Episode complete. Duration: {episode_duration:.1f}s")
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                # Mac client disconnected
+                if step_idx > 0 and episode_start_time:
+                    episode_duration = time.time() - episode_start_time
+                    logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration:.1f}s")
+                logger.info("Mac client disconnected.")
+                break
 
         logger.info(f"\n{'='*60}")
         logger.info("All episodes complete!")
@@ -249,10 +276,8 @@ def main():
     parser.add_argument('--policy-class', type=str, default='ACT',
                        choices=['ACT', 'Diffusion', 'CNNMLP'],
                        help='Policy class')
-    parser.add_argument('--num-episodes', type=int, default=5,
-                       help='Number of episodes to run')
-    parser.add_argument('--max-steps', type=int, default=500,
-                       help='Max steps per episode')
+    # Note: num_episodes and max_steps are controlled by Mac client
+    # GPU server follows Mac client's control
     parser.add_argument('--action-port', type=int, default=9999,
                        help='Port to send actions')
     parser.add_argument('--qpos-port', type=int, default=9998,
@@ -278,8 +303,6 @@ def main():
         policy_checkpoint=args.checkpoint,
         policy_config=policy_config,
         stats_path=args.stats,
-        num_episodes=args.num_episodes,
-        max_steps=args.max_steps,
     )
 
 
