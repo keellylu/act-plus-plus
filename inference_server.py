@@ -21,6 +21,8 @@ import torch
 import numpy as np
 import time
 import logging
+import signal
+import sys
 from pathlib import Path
 
 from spot_real_env_gpu import SpotRealEnvGPU
@@ -146,8 +148,21 @@ def run_inference(
     logger.info(f"  python inference_client.py --gpu-ip <GPU_IP>")
     logger.info("="*60 + "\n")
 
+    def signal_handler(sig, frame):
+        logger.info("\nReceived interrupt signal. Shutting down...")
+        env.shutdown()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     # Wait for Mac to connect
-    env.wait_for_mac_connection()
+    try:
+        env.wait_for_mac_connection()
+    except KeyboardInterrupt:
+        logger.info("\nShutdown requested before Mac connection")
+        env.shutdown()
+        return
 
     try:
         for episode_idx in range(num_episodes):
@@ -217,6 +232,7 @@ def run_inference(
 
     finally:
         logger.info("Shutting down...")
+        env.stop_event.set()  # Signal all threads to stop
         env.shutdown()
 
 

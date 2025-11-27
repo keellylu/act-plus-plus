@@ -84,9 +84,22 @@ def get_args_parser():
 
 
 def build_ACT_model_and_optimizer(args_override):
-    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()], add_help=False)
+    # Parse with empty args to get defaults, but ignore parse_args error handling
+    try:
+        args = parser.parse_args([])
+    except SystemExit:
+        # If parsing fails due to missing required args, create namespace with defaults
+        args = argparse.Namespace()
+        # Set defaults from the parser
+        for action in parser._actions:
+            if action.dest != 'help':
+                if action.default is not argparse.SUPPRESS:
+                    setattr(args, action.dest, action.default)
+                elif not hasattr(args, action.dest):
+                    setattr(args, action.dest, None)
 
+    # Override with provided arguments
     for k, v in args_override.items():
         setattr(args, k, v)
 
@@ -107,8 +120,20 @@ def build_ACT_model_and_optimizer(args_override):
 
 
 def build_CNNMLP_model_and_optimizer(args_override):
-    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()], add_help=False)
+    # Parse with empty args to get defaults, but ignore parse_args error handling
+    try:
+        args = parser.parse_args([])
+    except SystemExit:
+        # If parsing fails due to missing required args, create namespace with defaults
+        args = argparse.Namespace()
+        # Set defaults from the parser
+        for action in parser._actions:
+            if action.dest != 'help':
+                if action.default is not argparse.SUPPRESS:
+                    setattr(args, action.dest, action.default)
+                elif not hasattr(args, action.dest):
+                    setattr(args, action.dest, None)
 
     for k, v in args_override.items():
         setattr(args, k, v)

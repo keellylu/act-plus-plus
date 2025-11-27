@@ -17,8 +17,15 @@ import socket
 import numpy as np
 import cv2
 import logging
+import sys
+import os
+import signal
 from collections import deque
 from typing import Optional, Dict
+
+_project_root = os.path.dirname(os.path.abspath(__file__))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +62,12 @@ class CameraBuffer:
 def zed_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Event):
     """Stream ZED frames locally to buffer"""
     try:
-        from zed import stream_zed_frames
+        # Import from utils package directory
+        import sys
+        if 'utils' in sys.modules and not hasattr(sys.modules['utils'], '__path__'):
+            # If utils.py module is loaded, remove it to allow package import
+            del sys.modules['utils']
+        from utils.zed import stream_zed_frames
         logger.info("Starting ZED camera stream...")
 
         for rgb_bgr, depth in stream_zed_frames():
@@ -67,8 +79,25 @@ def zed_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Even
             timestamp = time.time()
             camera_buffer.append(rgb, timestamp)
 
+    except ImportError as e:
+        logger.warning(f"ZED camera dependencies not available: {e}")
+        logger.warning("Install ZED SDK Python API: https://www.stereolabs.com/docs/installation/")
+        logger.warning("ZED camera will not be available. Using placeholder images.")
+        # Provide placeholder images so inference can continue
+        while not stop_event.is_set():
+            placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
+            timestamp = time.time()
+            camera_buffer.append(placeholder, timestamp)
+            time.sleep(0.033)  # ~30 FPS
     except Exception as e:
         logger.error(f"ZED streaming error: {e}")
+        logger.warning("ZED camera will not be available. Using placeholder images.")
+        # Provide placeholder images so inference can continue
+        while not stop_event.is_set():
+            placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
+            timestamp = time.time()
+            camera_buffer.append(placeholder, timestamp)
+            time.sleep(0.033)  # ~30 FPS
     finally:
         logger.info("ZED streaming stopped")
 
@@ -76,7 +105,12 @@ def zed_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Even
 def kiwi_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Event):
     """Stream Kiwi frames from incoming network connection"""
     try:
-        from kiwi import stream_kiwi_frames, start_kiwi_server
+        # Import from utils package directory
+        import sys
+        if 'utils' in sys.modules and not hasattr(sys.modules['utils'], '__path__'):
+            # If utils.py module is loaded, remove it to allow package import
+            del sys.modules['utils']
+        from utils.kiwi import stream_kiwi_frames, start_kiwi_server
 
         logger.info("Starting Kiwi server...")
         conn, addr = start_kiwi_server(host='0.0.0.0', port=8888)
@@ -91,8 +125,25 @@ def kiwi_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Eve
 
         conn.close()
 
+    except ImportError as e:
+        logger.warning(f"Kiwi camera dependencies not available: {e}")
+        logger.warning("Kiwi camera will not be available. Using placeholder images.")
+        logger.warning("Make sure frame_bundle_pb2.py is in utils/ directory.")
+        # Provide placeholder images so inference can continue
+        while not stop_event.is_set():
+            placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
+            timestamp = time.time()
+            camera_buffer.append(placeholder, timestamp)
+            time.sleep(0.033)  # ~30 FPS
     except Exception as e:
         logger.error(f"Kiwi streaming error: {e}")
+        logger.warning("Kiwi camera will not be available. Using placeholder images.")
+        # Provide placeholder images so inference can continue
+        while not stop_event.is_set():
+            placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
+            timestamp = time.time()
+            camera_buffer.append(placeholder, timestamp)
+            time.sleep(0.033)  # ~30 FPS
     finally:
         logger.info("Kiwi streaming stopped")
 
@@ -207,15 +258,37 @@ class SpotRealEnvGPU:
         if self.action_sock is None or self.qpos_sock is None:
             self.setup_network_sockets()
 
+        # Make sockets non-blocking with timeout to allow interrupt
+        self.action_sock.settimeout(1.0)
+        self.qpos_sock.settimeout(1.0)
+
         # Wait for action connection
         logger.info(f"Waiting for action connection on port {self.action_send_port}...")
-        self.action_conn, action_addr = self.action_sock.accept()
-        logger.info(f"Action connection from {action_addr}")
+        while True:
+            try:
+                self.action_conn, action_addr = self.action_sock.accept()
+                logger.info(f"Action connection from {action_addr}")
+                break
+            except socket.timeout:
+                if self.stop_event.is_set():
+                    raise KeyboardInterrupt("Shutdown requested")
+                continue
 
         # Wait for qpos connection
         logger.info(f"Waiting for qpos connection on port {self.qpos_receive_port}...")
-        self.qpos_conn, qpos_addr = self.qpos_sock.accept()
-        logger.info(f"Qpos connection from {qpos_addr}")
+        while True:
+            try:
+                self.qpos_conn, qpos_addr = self.qpos_sock.accept()
+                logger.info(f"Qpos connection from {qpos_addr}")
+                break
+            except socket.timeout:
+                if self.stop_event.is_set():
+                    raise KeyboardInterrupt("Shutdown requested")
+                continue
+
+        # Reset to blocking after connection
+        self.action_conn.settimeout(None)
+        self.qpos_conn.settimeout(None)
 
         logger.info("✓ Mac client connected!")
 
@@ -283,16 +356,33 @@ class SpotRealEnvGPU:
 
         self.stop_event.set()
 
+        # Give threads a moment to check stop_event
+        time.sleep(0.1)
+
         for thread in self.streaming_threads:
-            thread.join(timeout=2.0)
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                logger.warning(f"Thread {thread.name} did not stop gracefully")
 
         if self.action_conn is not None:
-            self.action_conn.close()
+            try:
+                self.action_conn.close()
+            except:
+                pass
         if self.qpos_conn is not None:
-            self.qpos_conn.close()
+            try:
+                self.qpos_conn.close()
+            except:
+                pass
         if self.action_sock is not None:
-            self.action_sock.close()
+            try:
+                self.action_sock.close()
+            except:
+                pass
         if self.qpos_sock is not None:
-            self.qpos_sock.close()
+            try:
+                self.qpos_sock.close()
+            except:
+                pass
 
         logger.info("GPU environment shutdown complete")

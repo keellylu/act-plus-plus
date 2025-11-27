@@ -557,6 +557,7 @@ def train_bc(train_dataloader, val_dataloader, config):
     eval_every = config['eval_every']
     validate_every = config['validate_every']
     save_every = config['save_every']
+    real_robot = config['real_robot']
 
     set_seed(seed)
 
@@ -603,8 +604,8 @@ def train_bc(train_dataloader, val_dataloader, config):
                 summary_string += f'{k}: {v.item():.3f} '
             print(summary_string)
                 
-        # evaluation
-        if (step > 0) and (step % eval_every == 0):
+        # evaluation (skip for real robot - too time-consuming and requires robot availability)
+        if (step > 0) and (step % eval_every == 0) and not real_robot:
             # first save then eval
             ckpt_name = f'policy_step_{step}_seed_{seed}.ckpt'
             ckpt_path = os.path.join(ckpt_dir, ckpt_name)
