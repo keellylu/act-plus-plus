@@ -191,10 +191,9 @@ class InferenceClient:
                 self.send_qpos(qpos)
 
                 episode_start_time = time.time()
+                next_step_time = episode_start_time
 
                 for step_idx in range(max_steps):
-                    step_time = time.time()
-
                     # Receive action from GPU
                     action = self.receive_action()
 
@@ -213,11 +212,13 @@ class InferenceClient:
                                   f"Elapsed: {elapsed:.1f}s | "
                                   f"Qpos: [{qpos[0]:.3f}, {qpos[1]:.3f}, {qpos[2]:.3f}, ...]")
 
-                    # Rate limit to specified Hz
-                    elapsed_step = time.time() - step_time
-                    sleep_time = step_duration - elapsed_step
+                    # Rate limit to specified Hz using wall-clock time
+                    next_step_time += step_duration
+                    sleep_time = next_step_time - time.time()
                     if sleep_time > 0:
                         time.sleep(sleep_time)
+                    elif sleep_time < -0.01:  # More than 10ms late
+                        logger.warning(f"Step {step_idx} is {-sleep_time*1000:.1f}ms behind schedule")
 
                 episode_duration = time.time() - episode_start_time
                 logger.info(f"Episode complete. Duration: {episode_duration:.1f}s")

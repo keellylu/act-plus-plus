@@ -192,10 +192,10 @@ def run_inference(
         logger.info("Ready. Waiting for Mac client to start inference...")
         logger.info(f"Target inference frequency: {hz} Hz ({step_duration*1000:.1f}ms per step)")
 
+        next_step_time = time.time()
+
         while True:
             try:
-                step_time = time.time()
-
                 # Receive qpos from Mac (could be reset signal or next step)
                 qpos = env.receive_qpos()
                 
@@ -300,11 +300,13 @@ def run_inference(
                               f"Elapsed: {elapsed:.1f}s | "
                               f"Action: [{action[0]:.3f}, {action[1]:.3f}, {action[2]:.3f}, ...]")
 
-                # Rate limit to specified Hz
-                elapsed_step = time.time() - step_time
-                sleep_time = step_duration - elapsed_step
+                # Rate limit to specified Hz using wall-clock time
+                next_step_time += step_duration
+                sleep_time = next_step_time - time.time()
                 if sleep_time > 0:
                     time.sleep(sleep_time)
+                elif sleep_time < -0.01:  # More than 10ms late
+                    logger.warning(f"Step {step_idx} is {-sleep_time*1000:.1f}ms behind schedule")
 
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 # Mac client disconnected
