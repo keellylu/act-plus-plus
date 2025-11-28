@@ -34,7 +34,7 @@ class DiffusionPolicy(nn.Module):
 
         self.num_kp = 32
         self.feature_dimension = 64
-        self.ac_dim = args_override['action_dim'] # 11 (6 arm joints + 1 gripper + 3 body states + 1 pitch)
+        self.ac_dim = args_override['action_dim'] # 11 (6 arm joints + 1 gripper + 1 body z + 2 body velocities + 1 pitch)
         self.obs_dim = self.feature_dimension * len(self.camera_names) + 11 # camera features and proprio
 
         backbones = []
@@ -209,9 +209,6 @@ class ACTPolicy(nn.Module):
 
     def __call__(self, qpos, image, actions=None, is_pad=None, vq_sample=None):
         env_state = None
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-        image = normalize(image)
         if actions is not None: # training time
             actions = actions[:, :self.model.num_queries]
             is_pad = is_pad[:, :self.model.num_queries]

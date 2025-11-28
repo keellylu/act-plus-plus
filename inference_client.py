@@ -162,14 +162,17 @@ class InferenceClient:
             logger.error(f"Failed to execute action: {e}")
             raise
 
-    def run(self, num_episodes: int = 5, max_steps: int = 500):
+    def run(self, num_episodes: int = 5, max_steps: int = 500, hz: int = 20):
         """
         Main execution loop.
 
         Args:
             num_episodes: Number of episodes to run
             max_steps: Max steps per episode
+            hz: Execution frequency in Hz (default 20 Hz = 50ms per step)
         """
+        step_duration = 1.0 / hz  # Duration per step in seconds
+
         try:
             for episode_idx in range(num_episodes):
                 logger.info(f"\n{'='*60}")
@@ -190,6 +193,8 @@ class InferenceClient:
                 episode_start_time = time.time()
 
                 for step_idx in range(max_steps):
+                    step_time = time.time()
+
                     # Receive action from GPU
                     action = self.receive_action()
 
@@ -207,6 +212,12 @@ class InferenceClient:
                         logger.info(f"Step {step_idx:3d}/{max_steps} | "
                                   f"Elapsed: {elapsed:.1f}s | "
                                   f"Qpos: [{qpos[0]:.3f}, {qpos[1]:.3f}, {qpos[2]:.3f}, ...]")
+
+                    # Rate limit to specified Hz
+                    elapsed_step = time.time() - step_time
+                    sleep_time = step_duration - elapsed_step
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
                 episode_duration = time.time() - episode_start_time
                 logger.info(f"Episode complete. Duration: {episode_duration:.1f}s")
@@ -261,7 +272,7 @@ def main():
     logger.info("Starting inference execution loop...\n")
 
     # Run
-    client.run(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS)
+    client.run(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS, hz=20)
 
 
 if __name__ == '__main__':

@@ -62,22 +62,29 @@ class CameraBuffer:
 def zed_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Event):
     """Stream ZED frames locally to buffer"""
     try:
-        # Import from utils package directory
-        import sys
-        if 'utils' in sys.modules and not hasattr(sys.modules['utils'], '__path__'):
-            # If utils.py module is loaded, remove it to allow package import
-            del sys.modules['utils']
-        from utils.zed import stream_zed_frames
+        from utils_pkg.zed import stream_zed_frames
         logger.info("Starting ZED camera stream...")
 
+        frame_count = 0
         for rgb_bgr, depth in stream_zed_frames():
             if stop_event.is_set():
                 break
 
+            # Validate ZED image format
+            if len(rgb_bgr.shape) != 3 or rgb_bgr.shape[2] != 3:
+                logger.error(f"[ZED] Invalid image shape: {rgb_bgr.shape}. Expected (H, W, 3)")
+                continue
+
             # Convert BGR to RGB
             rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+
+            # Debug: Log first frame
+            if frame_count == 0:
+                logger.info(f"[ZED Buffer] First frame stored: shape={rgb.shape}, dtype={rgb.dtype}, channels={rgb.shape[2] if len(rgb.shape) == 3 else 'N/A'}")
+
             timestamp = time.time()
             camera_buffer.append(rgb, timestamp)
+            frame_count += 1
 
     except ImportError as e:
         logger.warning(f"ZED camera dependencies not available: {e}")
@@ -105,23 +112,29 @@ def zed_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Even
 def kiwi_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Event):
     """Stream Kiwi frames from incoming network connection"""
     try:
-        # Import from utils package directory
-        import sys
-        if 'utils' in sys.modules and not hasattr(sys.modules['utils'], '__path__'):
-            # If utils.py module is loaded, remove it to allow package import
-            del sys.modules['utils']
-        from utils.kiwi import stream_kiwi_frames, start_kiwi_server
+        from utils_pkg.kiwi import stream_kiwi_frames, start_kiwi_server
 
         logger.info("Starting Kiwi server...")
         conn, addr = start_kiwi_server(host='0.0.0.0', port=8888)
         logger.info(f"Kiwi client connected from {addr}")
 
+        frame_count = 0
         for rgb in stream_kiwi_frames(conn):
             if stop_event.is_set():
                 break
 
+            # Validate Kiwi image format
+            if len(rgb.shape) != 3 or rgb.shape[2] != 3:
+                logger.error(f"[Kiwi] Invalid image shape: {rgb.shape}. Expected (H, W, 3)")
+                continue
+
+            # Debug: Log first frame
+            if frame_count == 0:
+                logger.info(f"[Kiwi Buffer] First frame stored: shape={rgb.shape}, dtype={rgb.dtype}, channels={rgb.shape[2] if len(rgb.shape) == 3 else 'N/A'}")
+
             timestamp = time.time()
             camera_buffer.append(rgb, timestamp)
+            frame_count += 1
 
         conn.close()
 

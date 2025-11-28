@@ -134,15 +134,26 @@ def stream_zed_frames(
     depth_mat = sl.Mat()
 
     try:
+        frame_count = 0
         while True:
             if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
                 zed.retrieve_image(rgb_mat, sl.VIEW.LEFT)
                 rgb_bgra = rgb_mat.get_data()
+
+                # Debug: Log image shape on first frame
+                if frame_count == 0:
+                    print(f"[ZED] First frame shape: {rgb_bgra.shape}, dtype: {rgb_bgra.dtype}")
+
                 rgb_bgr = cv2.cvtColor(rgb_bgra, cv2.COLOR_BGRA2BGR)
+
+                # Debug: Log after conversion
+                if frame_count == 0:
+                    print(f"[ZED] After BGR conversion: {rgb_bgr.shape}, dtype: {rgb_bgr.dtype}")
 
                 zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH)
                 depth = depth_mat.get_data()
 
+                frame_count += 1
                 yield rgb_bgr, depth
             else:
                 time.sleep(0.001)

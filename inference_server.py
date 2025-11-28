@@ -23,7 +23,10 @@ import time
 import logging
 import signal
 import sys
+import cv2
 from pathlib import Path
+from torchvision import transforms
+from datetime import datetime
 
 from spot_real_env_gpu import SpotRealEnvGPU
 from policy import ACTPolicy, DiffusionPolicy, CNNMLPPolicy
@@ -110,10 +113,12 @@ def run_inference(
     policy_checkpoint: str,
     policy_config: dict,
     stats_path: str,
+    save_frames: bool = False,
+    frames_dir: str = None,
 ):
     """
     Main inference loop on GPU.
-    
+
     Note: GPU server follows Mac client's control. Mac client determines
     num_episodes and max_steps. GPU server loops until Mac disconnects.
 
@@ -121,10 +126,21 @@ def run_inference(
         policy_checkpoint: Path to policy weights
         policy_config: Policy configuration
         stats_path: Path to normalization stats
+        save_frames: Whether to save camera frames for debugging
+        frames_dir: Directory to save frames (created if doesn't exist)
     """
     # Setup
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Using device: {device}")
+
+    # Setup frame saving if requested
+    frames_path = None
+    if save_frames:
+        if frames_dir is None:
+            frames_dir = f"./inference_frames_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        frames_path = Path(frames_dir)
+        frames_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Saving frames to: {frames_path.absolute()}")
 
     # Load policy
     policy = load_policy(policy_checkpoint, policy_config, device=device)
@@ -170,11 +186,16 @@ def run_inference(
         step_idx = 0
         episode_start_time = None
         last_qpos = None
-        
+        hz = 20  # Target frequency in Hz
+        step_duration = 1.0 / hz  # Duration per step in seconds
+
         logger.info("Ready. Waiting for Mac client to start inference...")
-        
+        logger.info(f"Target inference frequency: {hz} Hz ({step_duration*1000:.1f}ms per step)")
+
         while True:
             try:
+                step_time = time.time()
+
                 # Receive qpos from Mac (could be reset signal or next step)
                 qpos = env.receive_qpos()
                 
@@ -214,15 +235,55 @@ def run_inference(
                 qpos_norm_tensor = torch.from_numpy(qpos_norm).float().unsqueeze(0).to(device)
 
                 # Convert images to tensors
-                image_tensors = {}
+                normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                 std=[0.229, 0.224, 0.225])
+                image_tensors = []
+
+                # Debug: log image info on first step of each episode
+                if step_idx == 0:  # Log on first step (step_idx starts at 0)
+                    logger.info(f"Image info for episode {episode_idx}:")
+
                 for cam_name, img in images.items():
-                    img_norm = (img.astype(np.float32) / 255.0 - 0.5) * 2.0
-                    img_tensor = torch.from_numpy(img_norm.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
-                    image_tensors[cam_name] = img_tensor
+                    # Log image info on first step
+                    if step_idx == 0:
+                        img_min, img_max = img.min(), img.max()
+                        logger.info(f"  {cam_name}: shape={img.shape}, dtype={img.dtype}, "
+                                  f"channels={img.shape[2] if len(img.shape) == 3 else 'N/A'}, "
+                                  f"min={img_min}, max={img_max}")
+
+                    # Save frame if requested
+                    if frames_path is not None and step_idx % 10 == 0:  # Save every 10th frame
+                        frame_path = frames_path / f"episode_{episode_idx:03d}_step_{step_idx:05d}_{cam_name}.png"
+                        # Save original image (convert RGB back to BGR for OpenCV)
+                        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(str(frame_path), img_bgr)
+
+                    # Resize to training dimensions (480, 640)
+                    if img.shape[:2] != (480, 640):
+                        img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
+
+                    # Normalize to [0, 1]
+                    img_normalized = img.astype(np.float32) / 255.0
+                    img_tensor = torch.from_numpy(img_normalized.transpose(2, 0, 1)).float().to(device)
+
+                    # Apply ImageNet normalization per camera
+                    img_tensor = normalize(img_tensor)
+                    img_tensor = img_tensor.unsqueeze(0)
+                    image_tensors.append(img_tensor)
+
+                # Concatenate all camera images
+                image_tensor = torch.cat(image_tensors, dim=1)
+
+                # Debug: log tensor shapes on first step
+                if step_idx == 0:
+                    logger.info(f"Image tensor shapes before concat:")
+                    for i, cam_tensor in enumerate(image_tensors):
+                        logger.info(f"  Camera {i}: {cam_tensor.shape}")
+                    logger.info(f"Final concatenated image tensor shape: {image_tensor.shape}")
 
                 # Policy inference
                 with torch.no_grad():
-                    action_tensor = policy(qpos_norm_tensor, image_tensors)
+                    action_tensor = policy(qpos_norm_tensor, image_tensor)
 
                 action = action_tensor.squeeze(0).cpu().numpy()
 
@@ -231,13 +292,19 @@ def run_inference(
 
                 # Send action to Mac
                 env.send_action(action)
-                
+
                 step_idx += 1
                 if step_idx % 50 == 0:
                     elapsed = time.time() - episode_start_time if episode_start_time else 0
                     logger.info(f"Step {step_idx:3d} | "
                               f"Elapsed: {elapsed:.1f}s | "
                               f"Action: [{action[0]:.3f}, {action[1]:.3f}, {action[2]:.3f}, ...]")
+
+                # Rate limit to specified Hz
+                elapsed_step = time.time() - step_time
+                sleep_time = step_duration - elapsed_step
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 # Mac client disconnected
@@ -276,6 +343,10 @@ def main():
     parser.add_argument('--policy-class', type=str, default='ACT',
                        choices=['ACT', 'Diffusion', 'CNNMLP'],
                        help='Policy class')
+    parser.add_argument('--save-frames', action='store_true',
+                       help='Save camera frames during inference for debugging')
+    parser.add_argument('--frames-dir', type=str, default=None,
+                       help='Directory to save frames (default: auto-generated)')
     # Note: num_episodes and max_steps are controlled by Mac client
     # GPU server follows Mac client's control
     parser.add_argument('--action-port', type=int, default=9999,
@@ -295,14 +366,20 @@ def main():
 
     # Load full config if provided
     if args.config:
-        with open(args.config, 'rb') as f:
-            full_config = pickle.load(f)
-        policy_config.update(full_config.get('policy_config', {}))
+        config_path = Path(args.config)
+        if not config_path.exists():
+            logger.warning(f"Config file not found: {args.config}. Continuing without it.")
+        else:
+            with open(args.config, 'rb') as f:
+                full_config = pickle.load(f)
+            policy_config.update(full_config.get('policy_config', {}))
 
     run_inference(
         policy_checkpoint=args.checkpoint,
         policy_config=policy_config,
         stats_path=args.stats,
+        save_frames=args.save_frames,
+        frames_dir=args.frames_dir,
     )
 
 

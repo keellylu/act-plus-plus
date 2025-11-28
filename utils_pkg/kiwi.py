@@ -229,12 +229,20 @@ def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False, save_images
 
             try:
                 pil_image = Image.open(BytesIO(rgb_data_manual))
+                original_mode = pil_image.mode
+
                 if pil_image.mode == 'RGBA':
                     pil_image = pil_image.convert('RGB')
                 elif pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
+
                 rgb = np.array(pil_image)
-            except Exception:
+
+                # Debug: Log image info on first frame
+                if frame_count == 1:
+                    print(f"[Kiwi] First frame: PIL mode={original_mode}, shape={rgb.shape}, dtype={rgb.dtype}")
+            except Exception as e:
+                print(f"[Kiwi] Error decoding frame {frame_count}: {e}")
                 continue
 
             # Print frame info (reduced frequency)
