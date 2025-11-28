@@ -19,24 +19,8 @@ import socket
 import numpy as np
 import time
 import logging
+import requests
 from pathlib import Path
-
-from bosdyn.client.robot import Robot
-from bosdyn.client import create_standard_sdk
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME
-
-# Try to import Spot utilities if available
-try:
-    from spot_utils import authenticate
-    from spot_lease import LeaseClient, LeaseKeepAlive
-except ImportError:
-    logger = logging.getLogger(__name__)
-    logger.warning("spot_utils not found - using basic authentication")
-    def authenticate(robot):
-        pass
-    def LeaseKeepAlive(*args, **kwargs):
-        return None
 
 # Setup logging
 logging.basicConfig(
@@ -49,54 +33,40 @@ logger = logging.getLogger(__name__)
 class InferenceClient:
     """Client that executes actions from GPU server on real Spot robot"""
 
-    def __init__(self, robot_hostname: str, gpu_ip: str, gpu_action_port: int = 9999, gpu_qpos_port: int = 9998):
+    def __init__(self, gpu_ip: str, spot_server_url: str, gpu_action_port: int = 9999, gpu_qpos_port: int = 9998):
         """
         Initialize the inference client.
 
         Args:
-            robot_hostname: Spot robot IP/hostname
             gpu_ip: GPU server IP address
+            spot_server_url: Spot server Flask endpoint (e.g., http://192.168.80.3:5001)
             gpu_action_port: Port to receive actions from GPU
             gpu_qpos_port: Port to send qpos to GPU
         """
-        self.robot_hostname = robot_hostname
         self.gpu_ip = gpu_ip
+        self.spot_server_url = spot_server_url
         self.gpu_action_port = gpu_action_port
         self.gpu_qpos_port = gpu_qpos_port
 
-        # Robot connection
-        self.robot = None
-        self.command_client = None
-        self.state_client = None
-        self.lease_client = None
-        self.lease_keepalive = None
-
-        # Network sockets
+        # Network sockets (GPU communication)
         self.action_socket = None
         self.qpos_socket = None
 
         logger.info("InferenceClient initialized")
 
     def connect_to_robot(self):
-        """Connect to Spot robot"""
-        logger.info(f"Connecting to Spot at {self.robot_hostname}...")
-
-        sdk = create_standard_sdk("spot_inference_client")
-        self.robot = sdk.create_robot(self.robot_hostname)
-        authenticate(self.robot)
-
-        self.command_client = self.robot.ensure_client(RobotCommandClient.default_service_name)
-        self.state_client = self.robot.ensure_client('robot-state')
-
-        self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
-        self.lease_client.take()
-        self.lease_keepalive = LeaseKeepAlive(
-            self.lease_client, must_acquire=True, return_at_exit=True
-        )
-
-        self.robot.time_sync.wait_for_sync()
-
-        logger.info("✓ Connected to Spot robot")
+        """Connect to Spot server"""
+        logger.info(f"Connecting to Spot server at {self.spot_server_url}...")
+        try:
+            # Test connection to Spot server
+            response = requests.get(f"{self.spot_server_url}/get_qpos", timeout=5)
+            if response.status_code == 200:
+                logger.info("✓ Connected to Spot server")
+            else:
+                raise RuntimeError(f"Spot server returned status {response.status_code}")
+        except Exception as e:
+            logger.error(f"Failed to connect to Spot server: {e}")
+            raise
 
     def connect_to_gpu(self):
         """Connect to GPU server"""
@@ -114,44 +84,40 @@ class InferenceClient:
 
     def get_qpos_from_robot(self) -> np.ndarray:
         """
-        Get current qpos from Spot.
+        Get current qpos from Spot server.
 
         Returns:
-            [11,] numpy array: [6 arm joints, 1 gripper, 4 body state]
+            [11,] numpy array: [6 arm joints, 1 gripper, 3 body position, 1 body pitch]
         """
-        state = self.state_client.get_robot_state()
-        arm_state = state.manipulator_state
-        mobility_state = state.kinematic_state
+        try:
+            response = requests.get(f"{self.spot_server_url}/get_qpos", timeout=5)
+            response.raise_for_status()
+            data = response.json()
 
-        # Arm joints (6)
-        q_arm = np.array(arm_state.position[:6], dtype=np.float64)
+            if data.get("status") != "ok":
+                raise RuntimeError(f"Spot server error: {data.get('message', 'Unknown error')}")
 
-        # Gripper (1)
-        gripper_open_fraction = arm_state.gripper_open_percentage / 100.0 if arm_state.gripper_open_percentage is not None else 0.5
-        q_gripper = np.array([gripper_open_fraction], dtype=np.float64)
-
-        # Body state (4)
-        body_frame = mobility_state.transforms_snapshot.child_to_parent_edge_map["body"]
-        pos = body_frame.parent_tform_child.position
-        rot = body_frame.parent_tform_child.rotation
-        pitch = rot.pitch
-        q_body = np.array([pos.x, pos.y, pos.z, pitch], dtype=np.float64)
-
-        # Concatenate
-        qpos = np.concatenate([q_arm, q_gripper, q_body])
-
-        return qpos
+            qpos = np.array(data["qpos"], dtype=np.float64)
+            return qpos
+        except Exception as e:
+            logger.error(f"Failed to get qpos from Spot server: {e}")
+            raise
 
     def reset_robot(self):
         """Reset robot to safe position"""
         logger.info("Resetting robot...")
+        try:
+            response = requests.post(f"{self.spot_server_url}/reset_robot", timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
-        # Stow arm
-        stow_cmd = RobotCommandBuilder.arm_stow_command()
-        self.command_client.robot_command(stow_cmd)
-        time.sleep(1.0)
+            if data.get("status") != "ok":
+                raise RuntimeError(f"Spot server error: {data.get('message', 'Unknown error')}")
 
-        logger.info("✓ Robot reset")
+            logger.info("✓ Robot reset")
+        except Exception as e:
+            logger.error(f"Failed to reset robot: {e}")
+            raise
 
     def receive_action(self) -> np.ndarray:
         """
@@ -182,41 +148,19 @@ class InferenceClient:
 
         Args:
             action: [11,] numpy array
-                [6 arm joints, 1 gripper, 4 body params]
+                [6 arm joints, 1 gripper, 1 body z, 2 body velocities, 1 body pitch]
         """
-        arm_q = action[:6]
-        gripper = action[6]
-        body_x, body_y, body_z, body_pitch = action[7:]
+        try:
+            payload = {"action": action.tolist()}
+            response = requests.post(f"{self.spot_server_url}/execute_action", json=payload, timeout=5)
+            response.raise_for_status()
+            data = response.json()
 
-        # Build arm command
-        arm_cmd = RobotCommandBuilder.arm_joint_move_command(
-            joint_targets=list(arm_q),
-            max_vel=1.0,
-            max_acc=1.0
-        )
-
-        # Build gripper command
-        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(gripper)
-
-        # Build body command
-        body_cmd = RobotCommandBuilder.body_pose_command(
-            x=body_x,
-            y=body_y,
-            z=body_z,
-            roll=0.0,
-            pitch=body_pitch,
-            yaw=0.0,
-            frame_name=BODY_FRAME_NAME
-        )
-
-        # Synchronize and send
-        full_cmd = RobotCommandBuilder.build_synchro_command(
-            arm_cmd,
-            gripper_cmd.synchronized_command.gripper_command,
-            body_cmd
-        )
-
-        self.command_client.robot_command(full_cmd)
+            if data.get("status") != "ok":
+                raise RuntimeError(f"Spot server error: {data.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Failed to execute action: {e}")
+            raise
 
     def run(self, num_episodes: int = 5, max_steps: int = 500):
         """
@@ -283,35 +227,28 @@ class InferenceClient:
                 self.action_socket.close()
             if self.qpos_socket:
                 self.qpos_socket.close()
-            if self.robot:
-                self.robot.power_off()
+            # Power off Spot via server
+            try:
+                requests.post(f"{self.spot_server_url}/power_off", timeout=5)
+            except Exception as e:
+                logger.error(f"Failed to power off robot: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Mac Client for ACT++ Spot Inference'
-    )
-    parser.add_argument('--gpu-ip', type=str, required=True,
-                       help='GPU server IP address')
-    parser.add_argument('--robot-ip', type=str, default='192.168.80.3',
-                       help='Spot robot IP address')
-    parser.add_argument('--action-port', type=int, default=9999,
-                       help='Port to receive actions from GPU')
-    parser.add_argument('--qpos-port', type=int, default=9998,
-                       help='Port to send qpos to GPU')
-    parser.add_argument('--num-episodes', type=int, default=5,
-                       help='Number of episodes to run')
-    parser.add_argument('--max-steps', type=int, default=500,
-                       help='Max steps per episode')
-
-    args = parser.parse_args()
+    # Configuration variables (edit these to change settings)
+    GPU_IP = "10.45.1.18"
+    SPOT_SERVER_URL = "http://192.168.80.3:5001"  # Change to your Spot server URL
+    GPU_ACTION_PORT = 9999
+    GPU_QPOS_PORT = 9998
+    NUM_EPISODES = 1
+    MAX_STEPS = 500
 
     # Create client
     client = InferenceClient(
-        robot_hostname=args.robot_ip,
-        gpu_ip=args.gpu_ip,
-        gpu_action_port=args.action_port,
-        gpu_qpos_port=args.qpos_port
+        gpu_ip=GPU_IP,
+        spot_server_url=SPOT_SERVER_URL,
+        gpu_action_port=GPU_ACTION_PORT,
+        gpu_qpos_port=GPU_QPOS_PORT
     )
 
     # Connect
@@ -319,12 +256,12 @@ def main():
     client.connect_to_gpu()
 
     logger.info("\n" + "="*60)
-    logger.info("CONNECTED TO BOTH SPOT AND GPU")
+    logger.info("CONNECTED TO BOTH SPOT SERVER AND GPU")
     logger.info("="*60)
     logger.info("Starting inference execution loop...\n")
 
     # Run
-    client.run(num_episodes=args.num_episodes, max_steps=args.max_steps)
+    client.run(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS)
 
 
 if __name__ == '__main__':
