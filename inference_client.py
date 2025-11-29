@@ -162,6 +162,73 @@ class InferenceClient:
             logger.error(f"Failed to execute action: {e}")
             raise
 
+    def wait_for_motion_complete(self,
+                                 target_qpos: np.ndarray,
+                                 position_tolerance: float = 0.05,
+                                 velocity_tolerance: float = 0.1,
+                                 max_wait_time: float = 5.0,
+                                 check_interval: float = 0.1) -> bool:
+        """
+        Wait for robot to reach target position and stop moving.
+
+        Args:
+            target_qpos: Target joint positions [11,]
+            position_tolerance: How close joints need to be to target (radians)
+            velocity_tolerance: How slow joints need to be moving (rad/s)
+            max_wait_time: Maximum time to wait (seconds)
+            check_interval: How often to check robot state (seconds)
+
+        Returns:
+            True if motion completed within max_wait_time, False if timeout
+        """
+        try:
+            start_time = time.time()
+            last_qpos = target_qpos.copy()
+            settled_count = 0
+            settled_threshold = 3  # Number of consecutive checks showing stillness
+
+            while time.time() - start_time < max_wait_time:
+                # Get current joint positions
+                current_qpos = self.get_qpos_from_robot()
+
+                # Calculate position error
+                position_error = np.abs(current_qpos - target_qpos)
+                max_position_error = np.max(position_error)
+
+                # Calculate velocity estimate (derivative of position)
+                velocity_estimate = np.abs(current_qpos - last_qpos) / check_interval
+                max_velocity = np.max(velocity_estimate)
+
+                # Check if settled
+                if max_position_error < position_tolerance and max_velocity < velocity_tolerance:
+                    settled_count += 1
+                    if settled_count >= settled_threshold:
+                        elapsed = time.time() - start_time
+                        logger.info(f"✓ Motion complete (settled after {elapsed:.2f}s)")
+                        logger.info(f"  Position error: {max_position_error:.4f} rad | "
+                                  f"Max velocity: {max_velocity:.4f} rad/s")
+                        return True
+                else:
+                    settled_count = 0  # Reset counter if motion detected
+                    elapsed = time.time() - start_time
+                    logger.debug(f"Moving... error={max_position_error:.4f} rad, "
+                               f"vel={max_velocity:.4f} rad/s, elapsed={elapsed:.2f}s")
+
+                last_qpos = current_qpos.copy()
+                time.sleep(check_interval)
+
+            # Timeout
+            elapsed = time.time() - start_time
+            current_qpos = self.get_qpos_from_robot()
+            position_error = np.abs(current_qpos - target_qpos)
+            logger.warning(f"Motion timeout after {elapsed:.2f}s")
+            logger.warning(f"  Final position error: {np.max(position_error):.4f} rad")
+            return False
+
+        except Exception as e:
+            logger.error(f"Failed to wait for motion: {e}")
+            raise
+
     def run(self, num_episodes: int = 5, max_steps: int = 500, hz: int = 20):
         """
         Main execution loop.
@@ -198,27 +265,34 @@ class InferenceClient:
                     action = self.receive_action()
 
                     # Execute on Spot
+                    logger.info(f"Step {step_idx}: Executing action...")
                     self.execute_action(action)
 
-                    # Get current qpos
+                    # Wait for robot to complete motion before next inference
+                    # Use current qpos as target since the action drives toward it
+                    target_qpos = self.get_qpos_from_robot()
+                    motion_complete = self.wait_for_motion_complete(
+                        target_qpos=target_qpos,
+                        position_tolerance=0.05,
+                        velocity_tolerance=0.05,
+                        max_wait_time=5.0
+                    )
+
+                    if not motion_complete:
+                        logger.warning(f"Step {step_idx}: Motion did not complete in time. "
+                                     "Proceeding anyway for next inference.")
+
+                    # Now that robot has stopped, get final qpos and images
                     qpos = self.get_qpos_from_robot()
 
-                    # Send back to GPU
+                    # Send qpos to GPU for next inference
                     self.send_qpos(qpos)
 
-                    if step_idx % 50 == 0:
+                    if step_idx % 10 == 0:
                         elapsed = time.time() - episode_start_time
                         logger.info(f"Step {step_idx:3d}/{max_steps} | "
                                   f"Elapsed: {elapsed:.1f}s | "
                                   f"Qpos: [{qpos[0]:.3f}, {qpos[1]:.3f}, {qpos[2]:.3f}, ...]")
-
-                    # Rate limit to specified Hz using wall-clock time
-                    next_step_time += step_duration
-                    sleep_time = next_step_time - time.time()
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                    elif sleep_time < -0.01:  # More than 10ms late
-                        logger.warning(f"Step {step_idx} is {-sleep_time*1000:.1f}ms behind schedule")
 
                 episode_duration = time.time() - episode_start_time
                 logger.info(f"Episode complete. Duration: {episode_duration:.1f}s")
