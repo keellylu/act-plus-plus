@@ -31,12 +31,21 @@ from datetime import datetime
 from spot_real_env_gpu import SpotRealEnvGPU
 from policy import ACTPolicy, DiffusionPolicy, CNNMLPPolicy
 
-# Setup logging
+# Setup logging to both console and file
+log_file = f"inference_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
+logger.info(f"Logging to {log_file}")
+
+# Suppress verbose PIL debug logs
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 
 def load_policy(checkpoint_path: str, policy_config: dict, device: str = 'cuda'):
@@ -94,17 +103,23 @@ def postprocess_action(action: np.ndarray, stats: dict) -> np.ndarray:
     Postprocess action from policy.
 
     Args:
-        action: raw action from policy
+        action: raw action from policy (normalized to ~[-1, 1])
         stats: normalization statistics
 
     Returns:
-        denormalized action
+        denormalized action (physical units: radians, m/s, etc.)
     """
     action_mean = stats.get('action_mean', 0.0)
     action_std = stats.get('action_std', 1.0)
+    action_min = stats.get('action_min', None)
+    action_max = stats.get('action_max', None)
 
+    # Denormalize to physical units
     action = action * action_std + action_mean
-    action = np.clip(action, -1.0, 1.0)
+
+    # Clip to training range (not [-1, 1])
+    if action_min is not None and action_max is not None:
+        action = np.clip(action, action_min, action_max)
 
     return action
 
@@ -190,7 +205,7 @@ def run_inference(
         step_duration = 1.0 / hz  # Duration per step in seconds
 
         logger.info("Ready. Waiting for Mac client to start inference...")
-        logger.info(f"Target inference frequency: {hz} Hz ({step_duration*1000:.1f}ms per step)")
+        logger.info(f"Target inference frequency: {hz} Hz")
 
         next_step_time = time.time()
 
@@ -198,7 +213,21 @@ def run_inference(
             try:
                 # Receive qpos from Mac (could be reset signal or next step)
                 qpos = env.receive_qpos()
-                
+
+                # Log received qpos
+                logger.info(f"Step {step_idx}: Received qpos: {qpos}")
+
+                # Check for out-of-range qpos (potential corruption)
+                training_qpos_min = [-0.15, -3.7, 0.66, -1.25, -2.36, -1.66]  # 3-sigma min
+                training_qpos_max = [0.11, 1.26, 3.87, 1.65, 0.30, 1.27]      # 3-sigma max
+                out_of_range = False
+                for i in range(6):
+                    if qpos[i] < training_qpos_min[i] or qpos[i] > training_qpos_max[i]:
+                        logger.warning(f"  WARNING: qpos[{i}] = {qpos[i]:.4f} is outside training range [{training_qpos_min[i]:.4f}, {training_qpos_max[i]:.4f}]")
+                        out_of_range = True
+                if out_of_range:
+                    logger.warning(f"  Full qpos: {qpos}")
+
                 # Detect new episode: if qpos changed significantly or it's the first one
                 is_new_episode = False
                 if last_qpos is None:
@@ -213,14 +242,20 @@ def run_inference(
                     is_new_episode = True
                     if step_idx > 0:
                         episode_duration = time.time() - episode_start_time
-                        logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration:.1f}s")
+                        logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration}s")
                     episode_idx += 1
                     logger.info(f"\n{'='*60}")
                     logger.info(f"Episode {episode_idx} started")
                     logger.info(f"{'='*60}")
                     episode_start_time = time.time()
                     step_idx = 0
-                
+                else:
+                    # Log qpos delta for non-reset steps
+                    qpos_delta = qpos - last_qpos
+                    delta_norm = np.linalg.norm(qpos_delta)
+                    qpos_delta_list = qpos_delta.tolist()
+                    logger.info(f"  Qpos delta: {qpos_delta_list}, norm={delta_norm}")
+
                 last_qpos = qpos.copy()
                 
                 # Get observation
@@ -287,18 +322,35 @@ def run_inference(
 
                 action = action_tensor.squeeze(0).cpu().numpy()
 
+                # Log raw policy output
+                if step_idx == 0:
+                    logger.info(f"Raw policy output (first step): {action}")
+                    logger.info(f"  Min: {action.min()}, Max: {action.max()}")
+                    logger.info(f"  Current qpos: {qpos_obs}")
+
                 # Postprocess
                 action = postprocess_action(action, stats)
+
+                # Log postprocessed action
+                if step_idx == 0:
+                    logger.info(f"After postprocessing: {action}")
+
+                # Log action for all steps (to catch extreme values)
+                action_norm = np.linalg.norm(action)
+                logger.info(f"Step {step_idx}: Sending action: {action}, norm={action_norm}")
 
                 # Send action to Mac
                 env.send_action(action)
 
                 step_idx += 1
-                if step_idx % 50 == 0:
+                if step_idx % 10 == 0:  # Changed from 50 to 10 for more frequent logging
                     elapsed = time.time() - episode_start_time if episode_start_time else 0
+                    action_flat = action.flatten() if hasattr(action, 'flatten') else action
+                    qpos_obs_flat = qpos_obs.flatten() if hasattr(qpos_obs, 'flatten') else qpos_obs
                     logger.info(f"Step {step_idx:3d} | "
                               f"Elapsed: {elapsed:.1f}s | "
-                              f"Action: [{action[0]:.3f}, {action[1]:.3f}, {action[2]:.3f}, ...]")
+                              f"Action: [{action_flat[0]:.3f}, {action_flat[1]:.3f}, {action_flat[2]:.3f}, ...] | "
+                              f"Qpos: [{qpos_obs_flat[0]:.3f}, {qpos_obs_flat[1]:.3f}, {qpos_obs_flat[2]:.3f}, ...]")
 
                 # Rate limit to specified Hz using wall-clock time
                 next_step_time += step_duration
@@ -312,7 +364,7 @@ def run_inference(
                 # Mac client disconnected
                 if step_idx > 0 and episode_start_time:
                     episode_duration = time.time() - episode_start_time
-                    logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration:.1f}s")
+                    logger.info(f"Episode {episode_idx} complete. Duration: {episode_duration}s")
                 logger.info("Mac client disconnected.")
                 break
 
