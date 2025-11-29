@@ -139,8 +139,8 @@ def kiwi_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Eve
         conn.close()
 
     except ImportError as e:
-        logger.warning(f"Kiwi camera dependencies not available: {e}")
-        logger.warning("Kiwi camera will not be available. Using placeholder images.")
+        logger.error(f"Kiwi ImportError: {e}", exc_info=True)
+        logger.warning("Kiwi camera dependencies not available. Using placeholder images.")
         logger.warning("Make sure frame_bundle_pb2.py is in utils/ directory.")
         # Provide placeholder images so inference can continue
         while not stop_event.is_set():
@@ -149,7 +149,7 @@ def kiwi_streaming_worker(camera_buffer: CameraBuffer, stop_event: threading.Eve
             camera_buffer.append(placeholder, timestamp)
             time.sleep(0.033)  # ~30 FPS
     except Exception as e:
-        logger.error(f"Kiwi streaming error: {e}")
+        logger.error(f"Kiwi streaming error: {e}", exc_info=True)
         logger.warning("Kiwi camera will not be available. Using placeholder images.")
         # Provide placeholder images so inference can continue
         while not stop_event.is_set():
@@ -328,9 +328,14 @@ class SpotRealEnvGPU:
         if self.qpos_conn is None:
             raise RuntimeError("Mac client not connected")
 
-        qpos_bytes = self.qpos_conn.recv(88)  # 11 * 8 bytes
-        if len(qpos_bytes) < 88:
-            raise RuntimeError("Incomplete qpos data received")
+        # Receive all 88 bytes (11 float64 values)
+        qpos_bytes = b''
+        while len(qpos_bytes) < 88:
+            chunk = self.qpos_conn.recv(88 - len(qpos_bytes))
+            if not chunk:
+                # Socket closed by remote end
+                raise RuntimeError("Mac client disconnected while receiving qpos")
+            qpos_bytes += chunk
 
         return np.frombuffer(qpos_bytes, dtype=np.float64)
 
