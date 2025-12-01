@@ -164,29 +164,39 @@ class InferenceClient:
             logger.error(f"Failed to reset robot: {e}", exc_info=True)
             raise
 
-    def receive_action(self) -> np.ndarray:
+    def receive_action(self, timeout: float = 10.0) -> np.ndarray:
         """
         Receive action from GPU server.
+
+        Args:
+            timeout: Timeout in seconds for receiving action
 
         Returns:
             [11,] numpy array
         """
+        expected_bytes = 88  # 11 * 8 bytes
+        action_bytes = b''
+        
+        # Set timeout
+        self.action_socket.settimeout(timeout)
+        
         try:
-            logger.debug("Waiting to receive action from GPU...")
-            start_time = time.time()
-            action_bytes = self.action_socket.recv(88)  # 11 * 8 bytes
-            elapsed = time.time() - start_time
-            logger.debug(f"Received {len(action_bytes)} bytes in {elapsed:.3f}s")
+            # Keep receiving until we have all bytes
+            while len(action_bytes) < expected_bytes:
+                chunk = self.action_socket.recv(expected_bytes - len(action_bytes))
+                if not chunk:
+                    raise RuntimeError("Connection closed by GPU server - GPU may have crashed or errored. Check GPU server logs.")
+                action_bytes += chunk
+            
+            if len(action_bytes) != expected_bytes:
+                raise RuntimeError(f"Incomplete action data received: got {len(action_bytes)} bytes, expected {expected_bytes}")
 
-            if len(action_bytes) < 88:
-                raise RuntimeError(f"Incomplete action data received: expected 88 bytes, got {len(action_bytes)}")
-
-            action = np.frombuffer(action_bytes, dtype=np.float64)
-            logger.debug(f"Parsed action: {action}")
-            return action
-        except Exception as e:
-            logger.error(f"Failed to receive action from GPU: {e}", exc_info=True)
-            raise
+            return np.frombuffer(action_bytes, dtype=np.float64)
+        except socket.timeout:
+            raise RuntimeError(f"Timeout waiting for action from GPU server (>{timeout}s). GPU may be processing or crashed. Check GPU server logs.")
+        finally:
+            # Reset to blocking
+            self.action_socket.settimeout(None)
 
     def send_qpos(self, qpos: np.ndarray):
         """
@@ -500,34 +510,41 @@ class InferenceClient:
 
 
 def main():
-    # Configuration variables (edit these to change settings)
-    GPU_IP = "10.45.1.18"
-    SPOT_SERVER_URL = "http://192.168.80.3:5001"  # Change to your Spot server URL
-    GPU_ACTION_PORT = 9999
-    GPU_QPOS_PORT = 9998
-    NUM_EPISODES = 1
-    MAX_STEPS = 500
+    parser = argparse.ArgumentParser(
+        description='Mac Client for ACT++ Spot Inference'
+    )
+    parser.add_argument('--gpu-ip', type=str, required=True,
+                       help='GPU server IP address')
+    parser.add_argument('--robot-ip', type=str, default='192.168.80.3',
+                       help='Spot robot IP address (used to construct server URL)')
+    parser.add_argument('--spot-server-url', type=str, default=None,
+                       help='Spot server URL (e.g., http://10.45.7.35:5001). If not provided, will use http://{robot-ip}:5001')
+    parser.add_argument('--action-port', type=int, default=9999,
+                       help='Port to receive actions from GPU')
+    parser.add_argument('--qpos-port', type=int, default=9998,
+                       help='Port to send qpos to GPU')
+    parser.add_argument('--num-episodes', type=int, default=5,
+                       help='Number of episodes to run')
+    parser.add_argument('--max-steps', type=int, default=500,
+                       help='Max steps per episode')
 
-    logger.info("="*60)
-    logger.info("INFERENCE CLIENT STARTING")
-    logger.info("="*60)
-    logger.info(f"Configuration:")
-    logger.info(f"  GPU IP: {GPU_IP}")
-    logger.info(f"  GPU action port: {GPU_ACTION_PORT}")
-    logger.info(f"  GPU qpos port: {GPU_QPOS_PORT}")
-    logger.info(f"  Spot server URL: {SPOT_SERVER_URL}")
-    logger.info(f"  Episodes: {NUM_EPISODES}")
-    logger.info(f"  Max steps: {MAX_STEPS}")
+    args = parser.parse_args()
 
-    try:
-        # Create client
-        logger.info("\nCreating inference client...")
-        client = InferenceClient(
-            gpu_ip=GPU_IP,
-            spot_server_url=SPOT_SERVER_URL,
-            gpu_action_port=GPU_ACTION_PORT,
-            gpu_qpos_port=GPU_QPOS_PORT
-        )
+    # Construct server URL
+    if args.spot_server_url:
+        spot_server_url = args.spot_server_url
+    else:
+        spot_server_url = f"http://{args.robot_ip}:5001"
+
+    logger.info(f"Spot server URL: {spot_server_url}")
+
+    # Create client
+    client = InferenceClient(
+        gpu_ip=args.gpu_ip,
+        spot_server_url=spot_server_url,
+        gpu_action_port=args.action_port,
+        gpu_qpos_port=args.qpos_port
+    )
 
         # Connect to robot
         logger.info("\nConnecting to Spot robot...")
@@ -550,19 +567,11 @@ def main():
         logger.info("="*60)
         logger.info("Starting inference execution loop...\n")
 
-        # Run
-        client.run(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS)
-
-    except KeyboardInterrupt:
-        logger.info("Main interrupted by user")
-    except Exception as e:
-        logger.critical(f"Fatal error in main: {e}", exc_info=True)
-        return 1
-
-    logger.info("\nMain execution completed successfully")
-    return 0
+    # Run
+    client.run(num_episodes=args.num_episodes, max_steps=args.max_steps, hz=20)
 
 
 if __name__ == '__main__':
-    exit_code = main()
-    sys.exit(exit_code)
+    main()
+
+    #  python inference_client.py --gpu-ip 10.45.1.18 --spot-server-url http://10.45.6.171:5001 --num-episodes 1 --max-steps 600
